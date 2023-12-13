@@ -1,0 +1,9 @@
+[project]
+name = "py-fido-cable-test"
+dependencies = [
+  "bleak == 0.21.1",
+  "cryptography == 41.0.7",
+  "PyGObject == 3.46.0",
+  "qrcode == 7.4.2",
+]
+requires-python = ">= 3.11"

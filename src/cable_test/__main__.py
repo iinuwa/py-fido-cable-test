@@ -1,4 +1,4 @@
-#!/home/isaiah/Development/python/cable-test/env/bin/python3
+#!/home/isaiah/Development/python/py-fido-cable-test/env/bin/python3
 import sys
 
 import gi

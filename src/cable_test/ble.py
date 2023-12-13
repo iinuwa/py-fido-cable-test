@@ -22,7 +22,7 @@ def _start(start_event):
     
 def init():
     start_event = threading.Event()
-    th = threading.Thread(target=_start, args=(start_event,))
+    th = threading.Thread(target=_start, args=(start_event,), daemon=True)
     th.start()
     start_event.wait()
 
