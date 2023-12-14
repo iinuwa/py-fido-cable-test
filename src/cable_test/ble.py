@@ -26,11 +26,19 @@ def init():
     th.start()
     start_event.wait()
 
+
 def stop():
     loop.call_soon_threadsafe(loop.stop)
 
 
-def detect_fido_advert(qr_secret, device, advert):
+def await_advert(qr_secret, callback, context):
+    def cb(fut):
+        callback(fut, context)
+    fut = asyncio.run_coroutine_threadsafe(_scan_adverts(qr_secret), loop)
+    fut.add_done_callback(cb)
+
+
+def _detect_fido_advert(qr_secret, device, advert):
     try:
         for uuid in FIDO_CABLE_BLE_UUIDS:
             if ciphertext := advert.service_data.get(uuid):
@@ -55,13 +63,8 @@ async def _scan_adverts(qr_secret):
     ) as scanner:
         print("Scanning for FIDO2 caBLE BLE advertisements...")
         async for device, advert in scanner.advertisement_data():
-            if data := detect_fido_advert(qr_secret, device, advert):
+            if data := _detect_fido_advert(qr_secret, device, advert):
                 return data
-
-
-def await_advert(qr_secret, callback):
-    fut = asyncio.run_coroutine_threadsafe(_scan_adverts(qr_secret), loop)
-    fut.add_done_callback(callback)
 
 
 def _reserved_bits_are_zero(data):

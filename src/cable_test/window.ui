@@ -2,16 +2,22 @@
   <requires lib="gtk" version="4.0"/>
   
   <template class="QrViewerWindow" parent="GtkApplicationWindow">
-    <property name="default-width">600</property>
-    <property name="default-height">300</property>
+    <property name="default-width">300</property>
+    <property name="default-height">600</property>
     <property name="title">caBLE Test</property>
     <child>
-      <object class="GtkBox" id="container">
+      <object class="GtkBox" id="outer_container">
+        <property name="orientation">vertical</property>
         <child>
-            <object class="GtkButton" id="start_button">
-                <property name="label">Click to Start</property>
-                <signal name="clicked" handler="start_button_clicked" swapped="no" />
-            </object>
+          <object class="GtkBox" id="qr_container">
+            <property name="orientation">vertical</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="start_button">
+              <property name="label">Click to Start</property>
+              <signal name="clicked" handler="start_button_clicked" swapped="no" />
+          </object>
         </child>
       </object>
     </child>
