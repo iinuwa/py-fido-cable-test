@@ -67,3 +67,8 @@ def decrypt_ble_advertisement(secret, candidate_advert) -> bytes:
 
     plaintext = decryptor.update(msg) + decryptor.finalize()
     return plaintext
+
+
+def derive_tunnel_id(qr_secret):
+    tunnel_id = derive(qr_secret, None, KEY_PURPOSE_TUNNEL_ID)
+    return tunnel_id
