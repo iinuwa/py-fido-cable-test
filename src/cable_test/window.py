@@ -13,8 +13,8 @@ class QrViewerWindow(Gtk.ApplicationWindow):
     qr_code_image = None
     start_button = Gtk.Template.Child("start_button") ## Gtk.Template.Child("start_button")
     qr_container: Gtk.Box = Gtk.Template.Child("qr_container")
-    svg_width = 450
-    svg_height = 450
+    qr_width = 450
+    qr_height = 450
     task = None
     spinner = None
     label = None
@@ -24,10 +24,13 @@ class QrViewerWindow(Gtk.ApplicationWindow):
         self.start_button.connect('clicked', self.start_button_clicked)
 
     def start_button_clicked(self, start_button):
+        if self.task or not self.task.get_completed():
+            # multiple clicks shouldn't do anything
+            return
         (priv_key, pub_key, qr_secret) = crypto.generate_keys()
 
         qr_img = qr.generate_qr_code_as_svg(pub_key, qr_secret)
-        self.qr_code_image = self._svg_to_paintable(qr_img)
+        self.qr_code_image = self._svg_to_paintable(qr_img, self.qr_width, self.qr_height)
         self.label = Gtk.Label.new("Scan the QR code with your device. Make sure that the devices are close together and Bluetooth is turned on.")
         self.label.set_wrap(True)
         self.spinner = Gtk.Spinner.new()
@@ -37,15 +40,14 @@ class QrViewerWindow(Gtk.ApplicationWindow):
         self.qr_container.append(self.label)
         self.qr_container.append(self.spinner)
 
-        if self.task is None or self.task.get_completed():
-            print("starting ble scan")
-            self.ble_scan_start(qr_secret)
-            print("back to main thread")
+        print("starting ble scan")
+        self.ble_scan_start(qr_secret)
+        print("back to main thread")
 
     
-    def _svg_to_paintable(self, bytes):
+    def _svg_to_paintable(self, bytes, width, height):
         stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes(bytes))
-        pixbuf = GdkPixbuf.Pixbuf.new_from_stream_at_scale(stream, self.svg_width, self.svg_height, True, None)
+        pixbuf = GdkPixbuf.Pixbuf.new_from_stream_at_scale(stream, width, height, True, None)
         texture = Gdk.Texture.new_for_pixbuf(pixbuf)
         return Gtk.Picture.new_for_paintable(texture)
 
