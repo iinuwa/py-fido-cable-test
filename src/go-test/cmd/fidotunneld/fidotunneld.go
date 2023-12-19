@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -11,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"iinuwa.xyz/cable-test/internal/cable"
 )
 
 const WEBSOCKET_HANDSHAKE_GUID string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -48,7 +51,13 @@ func main() {
 			return
 		}
 
-		// ws_protocols := strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",")
+		ws_protocols := strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",")
+		for i := 0; i < len(ws_protocols); i++ {
+			if ws_protocols[i] == "fido.cable" {
+				w.Header().Add("Sec-WebSocket-Protocol", "fido.cable")
+				break
+			}
+		}
 
 		ws_key := r.Header.Get("Sec-WebSocket-Key")
 		if ws_key == "" {
@@ -82,7 +91,7 @@ func main() {
 		missed := 0
 	loop:
 		for {
-			if missed > 100 {
+			if missed > 50 {
 				break loop
 			}
 			select {
@@ -98,6 +107,7 @@ func main() {
 						break loop
 					}
 					println(string(data))
+					handleCableMessage(data)
 				}
 			case <-time.After(100 * time.Millisecond):
 				missed++
@@ -111,7 +121,6 @@ func main() {
 func processWebSocketConnection(ch chan slice, buf *bufio.ReadWriter) {
 	for {
 		var b [255]byte
-		println("processing ws connection...")
 		bytes_read, err := buf.Read(b[:])
 		if err == io.EOF {
 			time.Sleep(100 * time.Millisecond)
@@ -119,7 +128,8 @@ func processWebSocketConnection(ch chan slice, buf *bufio.ReadWriter) {
 		}
 		if err != nil {
 			close(ch)
-			ch <- slice{nil, 1}
+			// ch <- slice{nil, 1}
+			println("closing channel")
 			return
 		}
 		ch <- slice{b[:], bytes_read}
@@ -127,6 +137,7 @@ func processWebSocketConnection(ch chan slice, buf *bufio.ReadWriter) {
 }
 
 func processFrame(data []byte) (r []byte, err error) {
+	// Not implementing fragmented frames
 	// fin := data[0] >> 7
 	if data[0]&0b01110000 != 0 {
 		r = nil
@@ -180,6 +191,10 @@ func processFrame(data []byte) (r []byte, err error) {
 	return
 }
 
+func handleCableMessage(data []byte) {
+	cable.Derive()
+}
+
 func hasHeaderValue(headers http.Header, name string, expectedValue string) bool {
 	l := strings.Split(headers.Get(name), ",")
 	for i := 0; i < len(l); i++ {
@@ -188,4 +203,41 @@ func hasHeaderValue(headers http.Header, name string, expectedValue string) bool
 		}
 	}
 	return false
+}
+
+func doQRHandshake(websocketConn *websocket.Conn, identityKey *ecdsa.PrivateKey, qrSecret [32]byte, advertPlaintext [16]byte) {
+	var psk [32]byte
+	cable.Derive(psk[:], qrSecret[:], advertPlaintext[:], cable.KeyPurposePSK)
+
+	conn, handshakeHash := doHandshake(websocketConn, psk, identityKey, nil)
+	readPostHandshakeMessage(conn, handshakeHash)
+}
+
+func doHandshake(websocketConn *websocket.Conn,
+	psk [32]byte,
+	identityKey *ecdsa.PrivateKey,
+	// peerIdentity is not used until linked connections are discussed, below.
+	peerIdentity *ecdsa.PublicKey) (
+
+	conn io.ReadWriteCloser,
+	handshakeHash [32]byte) {
+
+	msg, ephemeralKey, noiseState := cable.InitialHandshakeMessage(psk, identityKey, peerIdentity)
+	if err := websocketConn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+		panic(err)
+	}
+
+	msgType, handshakeMessageFromPhone, err := websocketConn.ReadMessage()
+	if err != nil {
+		panic(err)
+	}
+	if msgType != websocket.BinaryMessage {
+		panic("non-binary message received on WebSocket")
+	}
+
+	trafficKeys, handshakeHash := processHandshakeResponse(
+		handshakeMessageFromPhone, ephemeralKey, identityKey, noiseState)
+
+	conn = newCableConn(&websocketAdaptor{websocketConn}, trafficKeys)
+	return conn, handshakeHash
 }

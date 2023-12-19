@@ -1,8 +1,11 @@
-package main
+package cable
 
 import (
 	"crypto/aes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/hkdf"
+	"iinuwa.xyz/cable-test/internal/cable/noise"
 )
 
 func main() {
@@ -20,7 +24,7 @@ func main() {
 		panic("BOGUS!")
 	}
 	var eid_key [32 + 32]byte
-	derive(eid_key[:], qr_secret, nil, keyPurposeEIDKey)
+	Derive(eid_key[:], qr_secret, nil, KeyPurposeEIDKey)
 	candidateAdvert, err := os.ReadFile("data/advert.bin")
 	if err != nil {
 		panic("BOGUS!")
@@ -160,12 +164,12 @@ func reservedBitsAreZero(plaintext [16]byte) bool {
 type keyPurpose uint32
 
 const (
-	keyPurposeEIDKey   keyPurpose = 1
-	keyPurposeTunnelID keyPurpose = 2
-	keyPurposePSK      keyPurpose = 3
+	KeyPurposeEIDKey   keyPurpose = 1
+	KeyPurposeTunnelID keyPurpose = 2
+	KeyPurposePSK      keyPurpose = 3
 )
 
-func derive(output, secret, salt []byte, purpose keyPurpose) {
+func Derive(output, secret, salt []byte, purpose keyPurpose) {
 	if uint32(purpose) >= 0x100 {
 		panic("unsupported purpose")
 	}
@@ -225,4 +229,89 @@ func decodeTunnelServerDomain(encoded uint16) (string, bool) {
 	ret += tlds[tldIndex&3]
 
 	return ret, true
+}
+
+const P256X962Length = 1 + 32 + 32
+
+func InitialHandshakeMessage(
+	psk [32]byte,
+	priv *ecdsa.PrivateKey,
+	peerPub *ecdsa.PublicKey) (
+
+	msg []byte,
+	ephemeralKey *ecdsa.PrivateKey,
+	noise *noise.NoiseState) {
+
+	if (priv == nil) == (peerPub == nil) {
+		panic("exactly one of priv and peerPub must be given")
+	}
+
+	var ns *noise.NoiseState
+	if peerPub != nil {
+		ns = noise.NewNoise(noise.NoiseNKpsk0)
+		ns.MixHash([]byte{0})
+		ns.MixHashPoint(peerPub)
+	} else {
+		ns = noise.NewNoise(noise.NoiseKNpsk0)
+		ns.MixHash([]byte{1})
+		ns.MixHashPoint(&priv.PublicKey)
+	}
+
+	ns.MixKeyAndHash(psk[:])
+
+	ephemeralKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+
+	ephemeralKeyBytes := elliptic.Marshal(ephemeralKey.Curve, ephemeralKey.X, ephemeralKey.Y)
+	ns.mixHash(ephemeralKeyBytes)
+	ns.mixKey(ephemeralKeyBytes)
+
+	if peerPub != nil {
+		ns.mixKey(ecdh(ephemeralKey, peerPub.X, peerPub.Y))
+	}
+
+	msg = append(msg, ephemeralKeyBytes...)
+	msg = append(msg, ns.encryptAndHash(nil)...)
+
+	return msg, ephemeralKey, ns
+}
+
+func processHandshakeResponse(
+	peerHandshakeMessage []byte,
+	ephemeralKey *ecdsa.PrivateKey,
+	priv *ecdsa.PrivateKey,
+	ns *noiseState) (
+
+	keys trafficKeys,
+	handshakeHash [32]byte) {
+
+	if len(peerHandshakeMessage) < p256X962Length {
+		panic("handshake too short")
+	}
+
+	peerPointBytes := peerHandshakeMessage[:p256X962Length]
+	ciphertext := peerHandshakeMessage[p256X962Length:]
+
+	ns.mixHash(peerPointBytes)
+	ns.mixKey(peerPointBytes)
+
+	peerPointX, peerPointY := elliptic.Unmarshal(ephemeralKey.Curve, peerPointBytes)
+	if peerPointX == nil {
+		panic("peer’s point is not on the curve")
+	}
+
+	ns.mixKey(ecdh(ephemeralKey, peerPointX, peerPointY))
+
+	if priv != nil {
+		ns.mixKey(ecdh(priv, peerPointX, peerPointY))
+	}
+
+	plaintext, ok := ns.decryptAndHash(ciphertext)
+	if !ok || len(plaintext) != 0 {
+		panic("bad handshake")
+	}
+
+	return ns.split(), ns.handshakeHash()
 }
