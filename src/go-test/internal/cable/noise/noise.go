@@ -23,9 +23,16 @@ type CipherState struct {
 	n uint32   // nonce
 }
 
+// CipherState InitializeKey(key)
 func newCipherState(key []byte) CipherState {
-	cs := CipherState{k: [32]byte(key[:32]), n: 0}
+	cs := CipherState{}
+	cs.InitializeKey(key)
 	return cs
+}
+
+func (cs *CipherState) InitializeKey(key []byte) {
+	cs.k = [32]byte(key[:32])
+	cs.n = 0
 }
 
 type SymmetricState struct {
@@ -53,6 +60,28 @@ func newSymmetricState(protocolName string) SymmetricState {
 	copy(ss.ck[:], ss.h[:])
 	ss.cs = newCipherState(nil)
 	return ss
+}
+
+func (ss *SymmetricState) MixKey(inputKeyMaterial []byte) {
+	ck, tempK, _ := hkdf(ss.ck, inputKeyMaterial, 2)
+	copy(ss.ck[:], ck[:])
+	ss.cs.InitializeKey(tempK)
+}
+
+func (ss *SymmetricState) MixHash(data []byte) {
+	h := noiseHash.New()
+	h.Sum(ss.h[:])
+	ss.h = [noiseHashLen]byte(h.Sum(data[:]))
+}
+
+func (ss *SymmetricState) MixKeyAndHash(inputKeyMaterial []byte) {
+	ck, tempH, tempK := hkdf(ss.ck, inputKeyMaterial, 3)
+	copy(ss.ck[:], ck[:])
+	ss.MixHash(tempH)
+	if noiseHashLen == 64 {
+		tempK = tempK[:32]
+	}
+	ss.cs.InitializeKey(tempK)
 }
 
 type HandshakeState struct {
@@ -83,11 +112,12 @@ func newHandshakeState(handshakePattern noisePattern, initiator bool, prologue [
 		panic("invalid handshake pattern given")
 	}
 	hs.ss = newSymmetricState(protocolName)
-	MixHash(prologue)
-	// repeat for initiators public keys
-	MixHash(publicKey)
-	// repeat for responders public keys
-	MixHash(publicKey)
+	hs.ss.MixHash(prologue)
+	// repeat for initiator's public keys
+	hs.ss.MixHash(rs)
+	hs.ss.MixHash(re)
+	// repeat for responder's public keys
+	hs.ss.MixHash(publicKey)
 }
 
 type NoiseState struct {
@@ -100,8 +130,11 @@ func NewNoise(handshakePattern noisePattern, initiator bool, prologue []byte, s 
 	return ns
 }
 
+func (ns *NoiseState) MixKey(inputKeyMaterial []byte) {
+	ns.hs.ss.MixKey(inputKeyMaterial)
+}
 func (ns *NoiseState) MixHash(data []byte) {
-	ns.h.Write(data)
+	ns.hs.ss.MixHash(data)
 }
 
 func MixHashPoint() {
@@ -109,19 +142,7 @@ func MixHashPoint() {
 }
 
 func (ns *NoiseState) MixKeyAndHash(inputKeyMaterial []byte) {
-	ck, tempH, tempK := hkdf(ck, inputKeyMaterial, 3)
-	ns.MixHash(tempH)
-	InitializeKey(tempK[:32])
-	ck
-
-	/*
-		It executes the following steps:
-			Sets ck, temp_h, temp_k = HKDF(ck, input_key_material, 3).
-			Calls MixHash(temp_h).
-			If HASHLEN is 64, then truncates temp_k to 32 bytes.
-			Calls InitializeKey(temp_k).
-	*/
-
+	ns.hs.ss.MixKeyAndHash(inputKeyMaterial)
 }
 
 func hkdf(chainingKey [noiseHashLen]byte, inputKeyMaterial []byte, numOutputs int) ([]byte, []byte, []byte) {
