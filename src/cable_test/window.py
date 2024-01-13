@@ -24,7 +24,7 @@ class QrViewerWindow(Gtk.ApplicationWindow):
         self.start_button.connect('clicked', self.start_button_clicked)
 
     def start_button_clicked(self, start_button):
-        if self.task or not self.task.get_completed():
+        if self.task and not self.task.get_completed():
             # multiple clicks shouldn't do anything
             return
         (priv_key, pub_key, qr_secret) = crypto.generate_keys()
