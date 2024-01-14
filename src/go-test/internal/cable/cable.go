@@ -2,8 +2,7 @@ package cable
 
 import (
 	"crypto/aes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -231,16 +230,16 @@ func decodeTunnelServerDomain(encoded uint16) (string, bool) {
 	return ret, true
 }
 
-const P256X962Length = 1 + 32 + 32
+const p256X962Length = 1 + 32 + 32
 
 func InitialHandshakeMessage(
 	psk [32]byte,
-	priv *ecdsa.PrivateKey,
-	peerPub *ecdsa.PublicKey) (
+	priv *ecdh.PrivateKey,
+	peerPub *ecdh.PublicKey) (
 
 	msg []byte,
-	ephemeralKey *ecdsa.PrivateKey,
-	noise *noise.NoiseState) {
+	ephemeralKey *ecdh.PrivateKey,
+	noiseState *noise.NoiseState) {
 
 	if (priv == nil) == (peerPub == nil) {
 		panic("exactly one of priv and peerPub must be given")
@@ -248,41 +247,46 @@ func InitialHandshakeMessage(
 
 	var ns *noise.NoiseState
 	if peerPub != nil {
-		ns = noise.NewNoise(noise.NoiseNKpsk0)
-		ns.MixHash([]byte{0})
-		ns.MixHashPoint(peerPub)
+		ns = noise.NewNoise(noise.Noise_NKpsk0_P256_AESGCM_SHA256, true, []byte{0}, peerPub.Bytes(), nil, nil, nil)
 	} else {
-		ns = noise.NewNoise(noise.NoiseKNpsk0)
-		ns.MixHash([]byte{1})
-		ns.MixHashPoint(&priv.PublicKey)
+		ns = noise.NewNoise(noise.Noise_KNpsk0_P256_AESGCM_SHA256, true, []byte{1}, priv.PublicKey().Bytes(), nil, nil, nil)
 	}
 
 	ns.MixKeyAndHash(psk[:])
 
-	ephemeralKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ephemeralKey, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		panic(err)
 	}
 
-	ephemeralKeyBytes := elliptic.Marshal(ephemeralKey.Curve, ephemeralKey.X, ephemeralKey.Y)
-	ns.mixHash(ephemeralKeyBytes)
-	ns.mixKey(ephemeralKeyBytes)
+	ephemeralKeyBytes := ephemeralKey.Bytes()
+	ns.MixHash(ephemeralKeyBytes)
+	ns.MixKey(ephemeralKeyBytes)
 
 	if peerPub != nil {
-		ns.mixKey(ecdh(ephemeralKey, peerPub.X, peerPub.Y))
+		ecdhKey, err := ephemeralKey.ECDH(peerPub)
+		if err != nil {
+			panic("Key agreement failed on handshake")
+		}
+		ns.MixKey(ecdhKey)
 	}
 
 	msg = append(msg, ephemeralKeyBytes...)
-	msg = append(msg, ns.encryptAndHash(nil)...)
+	msg = append(msg, ns.EncryptAndHash(nil)...)
 
 	return msg, ephemeralKey, ns
 }
 
+type trafficKeys struct {
+	toAuthenticator *noise.CipherState
+	toClient        *noise.CipherState
+}
+
 func processHandshakeResponse(
 	peerHandshakeMessage []byte,
-	ephemeralKey *ecdsa.PrivateKey,
-	priv *ecdsa.PrivateKey,
-	ns *noiseState) (
+	ephemeralKey *ecdh.PrivateKey,
+	priv *ecdh.PrivateKey,
+	ns *noise.NoiseState) (
 
 	keys trafficKeys,
 	handshakeHash [32]byte) {
@@ -294,24 +298,29 @@ func processHandshakeResponse(
 	peerPointBytes := peerHandshakeMessage[:p256X962Length]
 	ciphertext := peerHandshakeMessage[p256X962Length:]
 
-	ns.mixHash(peerPointBytes)
-	ns.mixKey(peerPointBytes)
+	ns.MixHash(peerPointBytes)
+	ns.MixKey(peerPointBytes)
 
-	peerPointX, peerPointY := elliptic.Unmarshal(ephemeralKey.Curve, peerPointBytes)
-	if peerPointX == nil {
+	peerPublicKey, err := ecdh.P256().NewPublicKey(peerPointBytes)
+	if err != nil {
 		panic("peer’s point is not on the curve")
 	}
 
-	ns.mixKey(ecdh(ephemeralKey, peerPointX, peerPointY))
-
-	if priv != nil {
-		ns.mixKey(ecdh(priv, peerPointX, peerPointY))
+	ecdhKey, err := ephemeralKey.ECDH(peerPublicKey)
+	if err != nil {
+		panic("Key agreement failed")
 	}
+	ns.MixKey(ecdhKey)
 
-	plaintext, ok := ns.decryptAndHash(ciphertext)
-	if !ok || len(plaintext) != 0 {
+	plaintext := ns.DecryptAndHash(ciphertext)
+	if len(plaintext) != 0 {
 		panic("bad handshake")
 	}
 
-	return ns.split(), ns.handshakeHash()
+	c1, c2 := ns.Split()
+	keys = trafficKeys{
+		toAuthenticator: c1,
+		toClient:        c2,
+	}
+	return keys, ns.HandshakeHash()
 }

@@ -235,7 +235,7 @@ func doHandshake(websocketConn *websocket.Conn,
 		panic("non-binary message received on WebSocket")
 	}
 
-	trafficKeys, handshakeHash := processHandshakeResponse(
+	trafficKeys, handshakeHash := cable.processHandshakeResponse(
 		handshakeMessageFromPhone, ephemeralKey, identityKey, noiseState)
 
 	conn = newCableConn(&websocketAdaptor{websocketConn}, trafficKeys)
