@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/ecdh"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -246,33 +245,38 @@ func InitialHandshakeMessage(
 	}
 
 	var ns *noise.NoiseState
+	psks := [1][]byte{psk[:]}
+	var peerPubBytes []byte = nil
 	if peerPub != nil {
-		ns = noise.NewNoise(noise.Noise_NKpsk0_P256_AESGCM_SHA256, true, []byte{0}, peerPub.Bytes(), nil, nil, nil)
-	} else {
-		ns = noise.NewNoise(noise.Noise_KNpsk0_P256_AESGCM_SHA256, true, []byte{1}, priv.PublicKey().Bytes(), nil, nil, nil)
+		peerPubBytes = peerPub.Bytes()
 	}
+	ns = noise.NewNoise(noise.Noise_NKpsk0_P256_AESGCM_SHA256, true, []byte{0}, priv.Bytes(), nil, peerPub.Bytes(), nil, psks[:])
 
-	ns.MixKeyAndHash(psk[:])
+	/*
+		ns.MixKeyAndHash(psk[:])
 
-	ephemeralKey, err := ecdh.P256().GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-
-	ephemeralKeyBytes := ephemeralKey.Bytes()
-	ns.MixHash(ephemeralKeyBytes)
-	ns.MixKey(ephemeralKeyBytes)
-
-	if peerPub != nil {
-		ecdhKey, err := ephemeralKey.ECDH(peerPub)
+		ephemeralKey, err := ecdh.P256().GenerateKey(rand.Reader)
 		if err != nil {
-			panic("Key agreement failed on handshake")
+			panic(err)
 		}
-		ns.MixKey(ecdhKey)
-	}
 
-	msg = append(msg, ephemeralKeyBytes...)
-	msg = append(msg, ns.EncryptAndHash(nil)...)
+		ephemeralKeyBytes := ephemeralKey.Bytes()
+		ns.MixHash(ephemeralKeyBytes)
+		ns.MixKey(ephemeralKeyBytes)
+
+		if peerPub != nil {
+			ecdhKey, err := ephemeralKey.ECDH(peerPub)
+			if err != nil {
+				panic("Key agreement failed on handshake")
+			}
+			ns.MixKey(ecdhKey)
+		}
+
+	*/
+	ns.WriteMessage(nil, msg)
+
+	// msg = append(msg, ephemeralKeyBytes...)
+	// msg = append(msg, ns.EncryptAndHash(nil)...)
 
 	return msg, ephemeralKey, ns
 }
