@@ -4,7 +4,9 @@ import (
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 )
@@ -141,52 +143,196 @@ type handshakeState struct {
 	rs              []byte // The remote party’s static public key
 	re              []byte // The remote party’s ephemeral public key
 	initiator       bool
-	messagePatterns [][]string
+	messageTokens   []string
+	patternPosition int
+	psks            [][]byte
+	pskPosition     int
 }
 
 // HandshakeState Initialize()
-func initializeHandshakeState(handshakePattern noisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte) handshakeState {
+func initializeHandshakeState(handshakePattern noisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte, psks [][]byte) handshakeState {
 	hs := handshakeState{
-		initiator: initiator,
-		s:         s,
-		e:         e,
-		rs:        rs,
-		re:        re,
+		initiator:       initiator,
+		s:               s,
+		e:               e,
+		rs:              rs,
+		re:              re,
+		patternPosition: 0,
+		psks:            psks,
+		pskPosition:     0,
 	}
 	var protocolName string
 	if handshakePattern == Noise_KNpsk0_P256_AESGCM_SHA256 {
 		protocolName = protocolNameKNpsk0
+		messageTokens := [10]string{"->", "s", "...", "->", "psk", "e", "<-", "e", "ee", "se"}
+		hs.messageTokens = messageTokens[:]
 	} else if handshakePattern == Noise_NKpsk0_P256_AESGCM_SHA256 {
 		protocolName = protocolNameNKpsk0
+		messageTokens := [10]string{"<-", "s", "...", "->", "psk", "e", "es", "<-", "e", "ee"}
+		hs.messageTokens = messageTokens[:]
 	} else {
 		panic("invalid handshake pattern given")
 	}
 	hs.ss = newSymmetricState(protocolName)
 	hs.ss.mixHash(prologue)
 	// Mix in pre-message keys
-	if handshakePattern == Noise_KNpsk0_P256_AESGCM_SHA256 {
-		if initiator {
-			hs.ss.mixHash(s)
-		} else {
-			hs.ss.mixHash(rs)
-		}
-	} else if handshakePattern == Noise_NKpsk0_P256_AESGCM_SHA256 {
-		if initiator {
-			hs.ss.mixHash(rs)
-		} else {
-			hs.ss.mixHash(s)
+	useRemoteKeys := !initiator
+	for i, token := range hs.messageTokens {
+		if token == "<-" {
+			useRemoteKeys = !useRemoteKeys
+		} else if token == "s" {
+			if useRemoteKeys {
+				hs.ss.mixHash(hs.rs)
+			} else {
+				hs.ss.mixHash(hs.s)
+			}
+		} else if token == "..." {
+			// finished with pre-messages
+			hs.patternPosition = i + 1
+			break
 		}
 	}
+	if hs.messageTokens[hs.patternPosition] == "->" && hs.initiator {
+
+	}
 	return hs
+}
+
+func (hs *handshakeState) writeMessage(payload []byte, msgBuf []byte) {
+	hasPsk := false
+	for _, token := range hs.messageTokens {
+		if token == "psk" {
+			hasPsk = true
+			break
+		}
+	}
+
+	// skip message tokens for other side
+	skippedTokens := 0
+	for _, token := range hs.messageTokens[hs.patternPosition:] {
+		if token == "->" {
+			if hs.initiator {
+				break
+			} else {
+				skippedTokens++
+			}
+		} else if token == "<-" {
+			if hs.initiator {
+				skippedTokens++
+			} else {
+				break
+			}
+		}
+	}
+	hs.patternPosition += skippedTokens + 1
+
+	// process my tokens
+	for i, token := range hs.messageTokens[hs.patternPosition:] {
+		if token == "->" {
+			if hs.initiator {
+				continue
+
+			} else {
+				hs.patternPosition += i + 1
+				break
+			}
+		} else if token == "<-" {
+			if hs.initiator {
+				hs.patternPosition += i + 1
+				break
+			} else {
+				continue
+			}
+		} else if token == "e" {
+			privKey, pubKey := generateKeypair()
+			hs.e = privKey
+			payload = append(payload, pubKey...)
+			hs.ss.mixHash(hs.e)
+			if hasPsk {
+				hs.ss.mixKey(hs.e)
+			}
+		} else if token == "ee" {
+			dhKey := dh(hs.e, hs.re)
+			hs.ss.mixKey(dhKey)
+		} else if token == "se" {
+			var dhKey []byte
+			if hs.initiator {
+				dhKey = dh(hs.s, hs.re)
+			} else {
+				dhKey = dh(hs.e, hs.rs)
+			}
+			hs.ss.mixKey(dhKey)
+		} else if token == "psk" {
+			psk := hs.psks[hs.pskPosition]
+			hs.ss.mixKeyAndHash(psk)
+			hs.pskPosition++
+		}
+	}
+}
+func (hs *handshakeState) readMessage(msg []byte, payloadBuf []byte) {
+	hasPsk := false
+	for _, token := range hs.messageTokens {
+		if token == "psk" {
+			hasPsk = true
+			break
+		}
+	}
+
+	// skip message tokens for other side
+	skippedTokens := 0
+	for _, token := range hs.messageTokens[hs.patternPosition:] {
+		if token == "->" {
+			if hs.initiator {
+				break
+			} else {
+				skippedTokens++
+			}
+		} else if token == "<-" {
+			if hs.initiator {
+				skippedTokens++
+			} else {
+				break
+			}
+		}
+	}
+	hs.patternPosition += skippedTokens + 1
+
+	for i, token := range hs.messageTokens[hs.patternPosition:] {
+		if token == "->" {
+			if hs.initiator {
+				continue
+
+			} else {
+				hs.patternPosition += i + 1
+				break
+			}
+		} else if token == "<-" {
+			if hs.initiator {
+				hs.patternPosition += i + 1
+				break
+			} else {
+				continue
+			}
+		} else if token == "e" {
+			hs.re = payloadBuf[:noiseDHLen]
+			hs.ss.mixHash(hs.re)
+			if hasPsk {
+				hs.ss.mixKey(hs.re)
+			}
+		} else if token == "ee" {
+		} else if token == "se" {
+		} else if token == "psk" {
+		}
+	}
 }
 
 type NoiseState struct {
 	hs handshakeState
 }
 
-func NewNoise(handshakePattern noisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte) *NoiseState {
+func NewNoise(handshakePattern noisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte, psks [][]byte) *NoiseState {
 	ns := NoiseState{}
-	ns.hs = initializeHandshakeState(handshakePattern, initiator, prologue, s, e, rs, re)
+	ns.hs = initializeHandshakeState(handshakePattern, initiator, prologue, s, e, rs, re, psks)
 	return &ns
 }
 
@@ -214,10 +360,30 @@ func (ns *NoiseState) HandshakeHash() [32]byte {
 	return ns.hs.ss.getHandshakeHash()
 }
 
+func (ns *NoiseState) WriteMessage(payload []byte, msgBuf []byte) {
+	ns.hs.writeMessage(payload, msgBuf)
+}
+
+func (ns *NoiseState) ReadMessage(msg []byte, payloadBuf []byte) {
+	ns.hs.readMessage(msg, payloadBuf)
+}
+
 func (ns *NoiseState) Split() (*CipherState, *CipherState) {
 	return ns.hs.ss.split()
 }
 
+func dh(privKey []byte, peerPubKey []byte) []byte {
+	a, err := ecdh.P256().NewPrivateKey(privKey)
+	if err != nil {
+		panic(err.Error())
+	}
+	b, err := ecdh.P256().NewPublicKey(peerPubKey)
+	if err != nil {
+		panic(err.Error())
+	}
+	dhKey, err := a.ECDH(b)
+	return dhKey
+}
 func encrypt(k []byte, n uint64, ad []byte, plaintext []byte) []byte {
 	block, err := aes.NewCipher(k)
 	if err != nil {
@@ -256,6 +422,14 @@ func decrypt(k []byte, n uint64, ad []byte, ciphertext []byte) []byte {
 	return result
 }
 
+func generateKeypair() (privKey []byte, pubKey []byte) {
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err.Error())
+	}
+	return key.Bytes(), key.PublicKey().Bytes()
+}
+
 func hkdf(chainingKey [noiseHashLen]byte, inputKeyMaterial []byte, numOutputs int) ([]byte, []byte, []byte) {
 	if numOutputs < 2 || numOutputs > 3 {
 		panic("invalid number of outputs specified")
@@ -286,4 +460,5 @@ func hmacHash(key []byte, data []byte) []byte {
 const (
 	noiseHashLen = sha256.Size
 	noiseHash    = crypto.SHA256
+	noiseDHLen   = 1 + 32 + 32 // X9.62 ECDH public key
 )
