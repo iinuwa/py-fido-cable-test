@@ -237,7 +237,6 @@ func InitialHandshakeMessage(
 	peerPub *ecdh.PublicKey) (
 
 	msg []byte,
-	ephemeralKey *ecdh.PrivateKey,
 	noiseState *noise.NoiseState) {
 
 	if (priv == nil) == (peerPub == nil) {
@@ -246,39 +245,21 @@ func InitialHandshakeMessage(
 
 	var ns *noise.NoiseState
 	psks := [1][]byte{psk[:]}
-	var peerPubBytes []byte = nil
+	var peerPubBytes, privKeyBytes []byte
+	var np noise.NoisePattern
+	var prologue []byte
 	if peerPub != nil {
-		peerPubBytes = peerPub.Bytes()
+		privKeyBytes, peerPubBytes = nil, peerPub.Bytes()
+		np = noise.Noise_NKpsk0_P256_AESGCM_SHA256
+		prologue = []byte{0}
+	} else {
+		privKeyBytes, peerPubBytes = priv.Bytes(), nil
+		np = noise.Noise_KNpsk0_P256_AESGCM_SHA256
+		prologue = []byte{0}
 	}
-	ns = noise.NewNoise(noise.Noise_NKpsk0_P256_AESGCM_SHA256, true, []byte{0}, priv.Bytes(), nil, peerPub.Bytes(), nil, psks[:])
-
-	/*
-		ns.MixKeyAndHash(psk[:])
-
-		ephemeralKey, err := ecdh.P256().GenerateKey(rand.Reader)
-		if err != nil {
-			panic(err)
-		}
-
-		ephemeralKeyBytes := ephemeralKey.Bytes()
-		ns.MixHash(ephemeralKeyBytes)
-		ns.MixKey(ephemeralKeyBytes)
-
-		if peerPub != nil {
-			ecdhKey, err := ephemeralKey.ECDH(peerPub)
-			if err != nil {
-				panic("Key agreement failed on handshake")
-			}
-			ns.MixKey(ecdhKey)
-		}
-
-	*/
+	ns = noise.NewNoise(np, true, prologue, privKeyBytes, nil, peerPubBytes, nil, psks[:])
 	ns.WriteMessage(nil, msg)
-
-	// msg = append(msg, ephemeralKeyBytes...)
-	// msg = append(msg, ns.EncryptAndHash(nil)...)
-
-	return msg, ephemeralKey, ns
+	return msg, ns
 }
 
 type trafficKeys struct {
@@ -288,9 +269,11 @@ type trafficKeys struct {
 
 func processHandshakeResponse(
 	peerHandshakeMessage []byte,
-	ephemeralKey *ecdh.PrivateKey,
 	priv *ecdh.PrivateKey,
-	ns *noise.NoiseState) (
+	identityKey *ecdh.PublicKey,
+	psk []byte,
+	qrInitiated bool,
+) (
 
 	keys trafficKeys,
 	handshakeHash [32]byte) {
@@ -298,25 +281,26 @@ func processHandshakeResponse(
 	if len(peerHandshakeMessage) < p256X962Length {
 		panic("handshake too short")
 	}
-
-	peerPointBytes := peerHandshakeMessage[:p256X962Length]
-	ciphertext := peerHandshakeMessage[p256X962Length:]
-
-	ns.MixHash(peerPointBytes)
-	ns.MixKey(peerPointBytes)
-
-	peerPublicKey, err := ecdh.P256().NewPublicKey(peerPointBytes)
-	if err != nil {
-		panic("peer’s point is not on the curve")
+	var np noise.NoisePattern
+	var initiator bool
+	var prologue, s, rs []byte
+	if qrInitiated {
+		np = noise.Noise_KNpsk0_P256_AESGCM_SHA256
+		initiator = false
+		prologue = []byte{0}
+		s = priv.Bytes()
+		rs = nil
+	} else {
+		np = noise.Noise_NKpsk0_P256_AESGCM_SHA256
+		initiator = true
+		prologue = []byte{1}
+		s = nil
+		rs = identityKey.Bytes()
 	}
+	psks := [][]byte{psk}
 
-	ecdhKey, err := ephemeralKey.ECDH(peerPublicKey)
-	if err != nil {
-		panic("Key agreement failed")
-	}
-	ns.MixKey(ecdhKey)
-
-	plaintext := ns.DecryptAndHash(ciphertext)
+	ns := noise.NewNoise(np, initiator, prologue, s, nil, rs, nil, psks)
+	plaintext := ns.ReadMessage(peerHandshakeMessage)
 	if len(plaintext) != 0 {
 		panic("bad handshake")
 	}

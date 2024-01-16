@@ -11,11 +11,11 @@ import (
 	"encoding/binary"
 )
 
-type noisePattern string
+type NoisePattern string
 
 const (
-	Noise_KNpsk0_P256_AESGCM_SHA256 noisePattern = "Noise_KNpsk0_P256_AESGCM_SHA256"
-	Noise_NKpsk0_P256_AESGCM_SHA256 noisePattern = "Noise_NKpsk0_P256_AESGCM_SHA256"
+	Noise_KNpsk0_P256_AESGCM_SHA256 NoisePattern = "Noise_KNpsk0_P256_AESGCM_SHA256"
+	Noise_NKpsk0_P256_AESGCM_SHA256 NoisePattern = "Noise_NKpsk0_P256_AESGCM_SHA256"
 )
 
 const (
@@ -150,7 +150,7 @@ type handshakeState struct {
 }
 
 // HandshakeState Initialize()
-func initializeHandshakeState(handshakePattern noisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte, psks [][]byte) handshakeState {
+func initializeHandshakeState(handshakePattern NoisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte, psks [][]byte) handshakeState {
 	hs := handshakeState{
 		initiator:       initiator,
 		s:               s,
@@ -184,16 +184,17 @@ func initializeHandshakeState(handshakePattern noisePattern, initiator bool, pro
 			if useRemoteKeys {
 				hs.ss.mixHash(hs.rs)
 			} else {
-				hs.ss.mixHash(hs.s)
+				staticKey, err := ecdh.P256().NewPrivateKey(hs.s)
+				if err != nil {
+					panic(err.Error())
+				}
+				hs.ss.mixHash(staticKey.PublicKey().Bytes())
 			}
 		} else if token == "..." {
 			// finished with pre-messages
 			hs.patternPosition = i + 1
 			break
 		}
-	}
-	if hs.messageTokens[hs.patternPosition] == "->" && hs.initiator {
-
 	}
 	return hs
 }
@@ -208,23 +209,25 @@ func (hs *handshakeState) writeMessage(payload []byte, msgBuf []byte) {
 	}
 
 	// skip message tokens for other side
-	skippedTokens := 0
-	for _, token := range hs.messageTokens[hs.patternPosition:] {
-		if token == "->" {
-			if hs.initiator {
-				break
-			} else {
-				skippedTokens++
-			}
-		} else if token == "<-" {
-			if hs.initiator {
-				skippedTokens++
-			} else {
-				break
+	/*
+		skippedTokens := 0
+		for _, token := range hs.messageTokens[hs.patternPosition:] {
+			if token == "->" {
+				if hs.initiator {
+					break
+				} else {
+					skippedTokens++
+				}
+			} else if token == "<-" {
+				if hs.initiator {
+					skippedTokens++
+				} else {
+					break
+				}
 			}
 		}
-	}
-	hs.patternPosition += skippedTokens + 1
+		hs.patternPosition += skippedTokens + 1
+	*/
 
 	// process my tokens
 	for i, token := range hs.messageTokens[hs.patternPosition:] {
@@ -254,6 +257,14 @@ func (hs *handshakeState) writeMessage(payload []byte, msgBuf []byte) {
 		} else if token == "ee" {
 			dhKey := dh(hs.e, hs.re)
 			hs.ss.mixKey(dhKey)
+		} else if token == "es" {
+			var dhKey []byte
+			if hs.initiator {
+				dhKey = dh(hs.e, hs.rs)
+			} else {
+				dhKey = dh(hs.s, hs.re)
+			}
+			hs.ss.mixKey(dhKey)
 		} else if token == "se" {
 			var dhKey []byte
 			if hs.initiator {
@@ -268,6 +279,8 @@ func (hs *handshakeState) writeMessage(payload []byte, msgBuf []byte) {
 			hs.pskPosition++
 		}
 	}
+
+	msgBuf = hs.ss.encryptAndHash(payload)
 }
 func (hs *handshakeState) readMessage(msg []byte, payloadBuf []byte) {
 	hasPsk := false
@@ -314,23 +327,44 @@ func (hs *handshakeState) readMessage(msg []byte, payloadBuf []byte) {
 				continue
 			}
 		} else if token == "e" {
-			hs.re = payloadBuf[:noiseDHLen]
+			hs.re = msg[:noiseDHLen]
 			hs.ss.mixHash(hs.re)
 			if hasPsk {
 				hs.ss.mixKey(hs.re)
 			}
 		} else if token == "ee" {
+			dhKey := dh(hs.e, hs.re)
+			hs.ss.mixKey(dhKey)
+		} else if token == "es" {
+			var dhKey []byte
+			if hs.initiator {
+				dhKey = dh(hs.e, hs.rs)
+			} else {
+				dhKey = dh(hs.s, hs.re)
+			}
+			hs.ss.mixKey(dhKey)
 		} else if token == "se" {
+			var dhKey []byte
+			if hs.initiator {
+				dhKey = dh(hs.s, hs.re)
+			} else {
+				dhKey = dh(hs.e, hs.rs)
+			}
+			hs.ss.mixKey(dhKey)
 		} else if token == "psk" {
+			psk := hs.psks[hs.pskPosition]
+			hs.ss.mixKeyAndHash(psk)
+			hs.pskPosition++
 		}
 	}
+	payloadBuf = hs.ss.decryptAndHash(msg[noiseDHLen:])
 }
 
 type NoiseState struct {
 	hs handshakeState
 }
 
-func NewNoise(handshakePattern noisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte, psks [][]byte) *NoiseState {
+func NewNoise(handshakePattern NoisePattern, initiator bool, prologue []byte, s []byte, e []byte, rs []byte, re []byte, psks [][]byte) *NoiseState {
 	ns := NoiseState{}
 	ns.hs = initializeHandshakeState(handshakePattern, initiator, prologue, s, e, rs, re, psks)
 	return &ns
@@ -360,12 +394,16 @@ func (ns *NoiseState) HandshakeHash() [32]byte {
 	return ns.hs.ss.getHandshakeHash()
 }
 
-func (ns *NoiseState) WriteMessage(payload []byte, msgBuf []byte) {
+func (ns *NoiseState) WriteMessage(payload []byte) []byte {
+	msgBuf := make([]byte, 0, 10)
 	ns.hs.writeMessage(payload, msgBuf)
+	return msgBuf
 }
 
-func (ns *NoiseState) ReadMessage(msg []byte, payloadBuf []byte) {
+func (ns *NoiseState) ReadMessage(msg []byte) []byte {
+	payloadBuf := make([]byte, 0, 10)
 	ns.hs.readMessage(msg, payloadBuf)
+	return payloadBuf
 }
 
 func (ns *NoiseState) Split() (*CipherState, *CipherState) {
